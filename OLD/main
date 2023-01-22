@@ -1,0 +1,342 @@
+use std::time::{ self, Instant };
+use std::include_str;
+use std::sync::Arc;
+use bytemuck::{ Pod, Zeroable };
+
+use vulkano_win::VkSurfaceBuild;
+use winit::event_loop::{ EventLoop };
+use winit::window::{ WindowBuilder };
+use winit::event::{ Event, WindowEvent };
+use winit::event_loop::ControlFlow;
+use winit::dpi::{ Size, LogicalSize };
+
+use vulkano::VulkanLibrary;
+use vulkano::instance::{ Instance, InstanceCreateInfo };
+use vulkano::device::{ Device, DeviceCreateInfo, QueueCreateInfo, DeviceExtensions };
+use vulkano::device::physical::PhysicalDevice;
+use vulkano::memory::allocator::{ MemoryAllocator, StandardMemoryAllocator, 
+    GenericMemoryAllocator };
+use vulkano::buffer::{ BufferUsage, CpuAccessibleBuffer };
+use vulkano::command_buffer::{ AutoCommandBufferBuilder, CommandBufferUsage, 
+    CopyBufferInfo, ClearColorImageInfo, CopyImageToBufferInfo, 
+    RenderPassBeginInfo, SubpassContents };
+use vulkano::command_buffer::allocator::{ CommandBufferAllocator, 
+    StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo };
+use vulkano::pipeline::graphics::viewport;
+use vulkano::sync:: { self, GpuFuture, FlushError };
+use vulkano::pipeline::{ Pipeline, ComputePipeline, PipelineBindPoint, GraphicsPipeline };
+use vulkano::descriptor_set::{ PersistentDescriptorSet, WriteDescriptorSet };
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::image::{ ImageDimensions, StorageImage };
+use vulkano::image::view::ImageView;
+use vulkano::format::{ Format, ClearColorValue };
+use vulkano::swapchain::{ self, Surface, SwapchainPresentInfo, Swapchain,
+    SwapchainCreateInfo, AcquireError };
+use vulkano::image::ImageUsage;
+use vulkano::render_pass::{ Framebuffer, FramebufferCreateInfo };
+
+// #[repr(C)]
+// #[derive(Debug, Default, Copy, Clone, Zeroable, Pod)]
+// struct MyStruct {
+//     time: f32,
+// }
+
+fn main() {
+    println!("Start!");
+    let library = VulkanLibrary::new().expect("no local Vulkan library/DLL");
+    let required_extensions = vulkano_win::required_extensions(&library);
+    let instance = Instance::new(
+        library, 
+        InstanceCreateInfo {
+            enabled_extensions: required_extensions,
+            ..Default::default()
+        }
+    )
+    .expect("failed to create instance");
+
+    let event_loop = EventLoop::new();  // ignore this for now
+    let surface = WindowBuilder::new()
+        .with_inner_size(Size::Logical(LogicalSize::new(1400.0f64, 800.0f64)))
+        .build_vk_surface(&event_loop, instance.clone())
+        .unwrap();
+
+    let device_extensions = DeviceExtensions {
+        khr_swapchain: true,
+        ..DeviceExtensions::empty()
+    };
+
+    let physical_devices = instance.enumerate_physical_devices().expect("no devices available");
+    let mut physical_device: Option<Arc<PhysicalDevice>> = None;
+    for device in physical_devices { 
+        physical_device = Some(device);
+    }
+    let mut physical_device = physical_device.expect("no devices available");
+
+    let caps = physical_device
+        .surface_capabilities(&surface, Default::default())
+        .expect("failed to get surface capabilities");
+
+    let dimensions = caps.current_extent.unwrap();
+    let composite_alpha = caps.supported_composite_alpha.iter().next().unwrap();
+    let image_format = Some(
+        physical_device
+            .surface_formats(&surface, Default::default())
+            .unwrap()[0]
+            .0,
+    );
+    let image_format = Some(Format::R8G8B8A8_UNORM);
+
+    let queue_family_index = physical_device
+        .queue_family_properties()
+        .iter()
+        .enumerate()
+        .position(|(_, q)| q.queue_flags.graphics)
+        .expect("couldn't find a graphical queue family") as u32;
+
+    let (device, mut queues) = Device::new(
+        physical_device,
+        DeviceCreateInfo {
+            queue_create_infos: vec![QueueCreateInfo {
+                queue_family_index,
+                ..Default::default()
+            }],
+            enabled_extensions: device_extensions,
+            ..Default::default()
+        },
+    )
+    .expect("failed to create device");
+
+    let memory_allocator = StandardMemoryAllocator::new_default(device.clone());
+    let command_allocator = StandardCommandBufferAllocator::new(device.clone(), 
+        StandardCommandBufferAllocatorCreateInfo::default());
+    let descriptor_allocator = StandardDescriptorSetAllocator::new(device.clone());
+    let queue = queues.next().unwrap();
+
+    let shader = cs::load(device.clone())
+        .expect("failed to create shader module");
+
+    let compute_pipeline = ComputePipeline::new(
+        device.clone(),
+        shader.entry_point("main").unwrap(),
+        &(),
+        None,
+        |_| {},
+    ).expect("failed to create compute pipeline");
+
+    let (swapchain, images) = Swapchain::new(
+        device.clone(),
+        surface.clone(),
+        SwapchainCreateInfo {
+            min_image_count: caps.min_image_count + 1, // How many buffers to use in the swapchain
+            image_format,
+            image_extent: dimensions.clone().into(),
+            image_usage: ImageUsage {
+                storage: true,
+                color_attachment: true,  // What the images are going to be used for
+                ..Default::default()
+            },
+            composite_alpha,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let render_pass = vulkano::single_pass_renderpass!(
+        device.clone(),
+        attachments: {
+            color: {
+                load: DontCare,
+                store: Store,
+                format: swapchain.image_format(),  // set the format the same as the swapchain
+                samples: 1,
+            }
+        },
+        pass: {
+            color: [color],
+            depth_stencil: {}
+        }
+    )
+    .unwrap();
+
+    let data = (0..1).map(|_| 0.0f32);
+    let buffer = CpuAccessibleBuffer::from_iter(
+        &memory_allocator,
+        BufferUsage {
+            storage_buffer: true,
+            ..Default::default()
+        },
+        false,
+        data,
+    )
+    .expect("failed to create buffer");
+
+    let mut sets = vec![];
+    let framebuffers = images
+        .iter()
+        .map(|image| {
+            let view = ImageView::new_default(image.clone()).unwrap();
+            let layout = compute_pipeline.layout().set_layouts().get(0).unwrap();
+            let set = PersistentDescriptorSet::new(
+                &descriptor_allocator,
+                layout.clone(),
+                [
+                    WriteDescriptorSet::image_view(0, view.clone()),
+                    WriteDescriptorSet::buffer(1, buffer.clone()),
+                ],
+            )
+            .unwrap();
+            sets.push(set);
+
+            Framebuffer::new(
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![view],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    
+    let mut command_index = 0;
+    let mut command_buffers = framebuffers
+        .iter()
+        .map(|framebuffer| {
+            let mut builder = AutoCommandBufferBuilder::primary(
+                &command_allocator,
+                queue.queue_family_index(),
+                CommandBufferUsage::MultipleSubmit,  // don't forget to write the correct buffer usage
+            )
+            .unwrap();
+
+            builder
+                .bind_pipeline_compute(compute_pipeline.clone())
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Compute,
+                    compute_pipeline.layout().clone(),
+                    0,
+                    sets[command_index].clone(),
+                )
+
+                // .begin_render_pass(
+                //     RenderPassBeginInfo {
+                //         clear_values: vec![Some([0.1, 0.1, 0.1, 1.0].into())],
+                //         ..RenderPassBeginInfo::framebuffer(framebuffer.clone())
+                //     },
+                //     SubpassContents::Inline,
+                // )
+                // .unwrap()
+                // .end_render_pass()
+                // .unwrap()
+
+                .dispatch([framebuffer.extent()[0] / 8, framebuffer.extent()[1] / 8, 1])
+                .unwrap()
+                ;
+
+                
+
+            command_index += 1;
+            Arc::new(builder.build().unwrap())
+        })
+        .collect::<Vec<_>>();
+
+    let now = Instant::now();
+    let mut old_since_time = now.elapsed().as_millis();
+    event_loop.run(move |event, _, control_flow| match event {
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => {
+            *control_flow = ControlFlow::Exit;
+        }
+        Event::WindowEvent {
+            event: WindowEvent::Resized(_),
+            ..
+        } => {
+
+        }
+        Event::MainEventsCleared => {
+            let since_time = now.elapsed().as_millis();
+            let delta_time = (since_time - old_since_time) as f64;
+
+            if delta_time > (1000.0 / 60.0) {
+                let elapsed_time = now.elapsed().as_secs_f32();
+
+                let (image_i, suboptimal, acquire_future) =
+                match swapchain::acquire_next_image(swapchain.clone(), None) {
+                    Ok(r) => r,
+                    _ => { return; }
+                    // Err(AcquireError::OutOfDate) => {
+                    //     recreate_swapchain = true;
+                    //     return;
+                    // }
+                    //Err(e) => panic!("Failed to acquire next image: {:?}", e),
+                };
+                
+                let execution = sync::now(device.clone())
+                    .join(acquire_future)
+                    .then_execute(queue.clone(), command_buffers[image_i as usize].clone())
+                    .unwrap()
+                    .then_swapchain_present(
+                        queue.clone(),
+                        SwapchainPresentInfo::swapchain_image_index(
+                            swapchain.clone(), 
+                            image_i
+                        )
+                    )
+                    .then_signal_fence_and_flush();
+
+                match execution {
+                    Ok(future) => {
+                        future.wait(None).unwrap();  // wait for the GPU to finish
+                    }
+                    Err(FlushError::OutOfDate) => {
+                        //recreate_swapchain = true;
+                    }
+                    Err(e) => {
+                        println!("Failed to flush future: {:?}", e);
+                    }
+                }
+                let mut content = buffer.write().unwrap();
+                content[0] = elapsed_time;
+            }
+        }
+        _ => (),
+    });
+}
+
+mod cs {
+    vulkano_shaders::shader!{
+        ty: "compute",
+        src: "
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
+layout(set = 0, binding = 1) buffer Time {
+    float data[];
+} time;
+
+void main() {
+    vec2 norm_coordinates = (gl_GlobalInvocationID.xy + vec2(0.5)) / vec2(imageSize(img));
+    vec2 c = (norm_coordinates - vec2(0.5)) * 2.0 - vec2(1.0, 0.0);
+
+    vec2 z = vec2(0.0, 0.0);
+    float i;
+    for (i = 0.0; i < 1.0; i += 0.005) {
+        z = vec2(
+            z.x * z.x - z.y * z.y + c.x * (1.0 / exp(time.data[0] / 3.0) * 5.0) + 0.005,
+            z.y * z.x + z.x * z.y + c.y * (1.0 / exp(time.data[0] / 3.0) * 5.0) + 0.65
+        );
+
+        if (length(z) > 4.0) {
+            break;
+        }
+    }
+
+    vec4 to_write = vec4(vec3(i), 1.0);
+    imageStore(img, ivec2(gl_GlobalInvocationID.xy), to_write);
+}"
+    }
+}
