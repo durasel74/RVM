@@ -23,6 +23,7 @@ impl Default for InstanceInitInfo {
         let required_extensions = InstanceExtensions {
             khr_surface: true,
             khr_win32_surface: true,
+            khr_get_surface_capabilities2: true,
             ..InstanceExtensions::empty()
         };
         let preferred_extensions = InstanceExtensions {

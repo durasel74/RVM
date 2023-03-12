@@ -35,6 +35,7 @@ impl Default for DeviceInitInfo {
     fn default() -> Self {
         let required_extensions = DeviceExtensions {
             khr_swapchain: true,
+            ext_full_screen_exclusive: true,
             ..DeviceExtensions::empty()
         };
         let preferred_extensions = DeviceExtensions {
