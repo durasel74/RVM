@@ -22,12 +22,16 @@ use vulkano::device::{ Device, DeviceCreateInfo, QueueCreateInfo, Queue };
 use vulkano::memory::allocator::{ GenericMemoryAllocator, GenericMemoryAllocatorCreateInfo, AllocationType, MemoryUsage };
 use vulkano::memory::allocator::suballocator::{ FreeListAllocator, BumpAllocator, PoolAllocator, BuddyAllocator };
 use vulkano::buffer::{ BufferUsage, BufferAccess, CpuAccessibleBuffer, CpuBufferPool, DeviceLocalBuffer };
-use vulkano::image::{ AttachmentImage, ImageAccess, ImageUsage, SwapchainImage };
+use vulkano::image::{ AttachmentImage, SwapchainImage, ImageAccess, ImageUsage, 
+    ImageLayout, SampleCount };
 use vulkano::image::view::ImageView;
 use vulkano::format::Format;
 use vulkano::swapchain::{ Surface, SurfaceInfo, SurfaceCapabilities, Win32Monitor,
     ColorSpace, PresentMode, FullScreenExclusive, Swapchain, SwapchainCreateInfo, 
     SwapchainCreationError };
+use vulkano::render_pass::{ RenderPass, RenderPassCreateInfo, RenderPassCreationError, 
+    SubpassDescription, AttachmentDescription, AttachmentReference, LoadOp, StoreOp, 
+    Framebuffer, FramebufferCreateInfo, FramebufferCreationError };
 
 use egui_winit_vulkano::Gui;
 use vulkano_win::VkSurfaceBuild;
@@ -228,22 +232,71 @@ fn recreate_swapchain(swapchain: Arc<Swapchain>, window: Arc<winit::window::Wind
     Ok(swapchain_images)
 }
 
+fn create_render_pass(device: Arc<Device>, image_format: Format) 
+-> Result<Arc<RenderPass>, RenderPassCreationError> {
+    let render_pass = RenderPass::new(
+        device.clone(),
+        RenderPassCreateInfo {
+            attachments: vec![
+                AttachmentDescription {
+                    format: Some(image_format),
+                    samples: SampleCount::Sample1,
+                    load_op: LoadOp::DontCare,
+                    store_op: StoreOp::Store,
+                    initial_layout: ImageLayout::ColorAttachmentOptimal,
+                    final_layout: ImageLayout::ColorAttachmentOptimal,
+                    ..Default::default()
+                }
+            ],
+            subpasses: vec![
+                SubpassDescription {
+                    color_attachments: vec![Some(AttachmentReference {
+                        attachment: 0,
+                        layout: ImageLayout::ColorAttachmentOptimal,
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                }
+            ],
+            ..Default::default()
+        },
+    )?;
+    Ok(render_pass)
+}
+
+fn create_framebuffers(render_pass: Arc<RenderPass>, images: &Vec<Arc<SwapchainImage>>)
+-> Result<Vec<Arc<Framebuffer>>, FramebufferCreationError> {
+    let mut result = vec![];
+    for image in images {
+        let view = ImageView::new_default(image.clone()).unwrap();
+        let framebuffer = Framebuffer::new(
+            render_pass.clone(),
+            FramebufferCreateInfo {
+                attachments: vec![view],
+                ..Default::default()
+            },
+        )?;
+        result.push(framebuffer);
+    }
+    Ok(result)
+}
+
 fn main() {
     let event_loop = EventLoop::new();
     let window_builder = WindowBuilder::new().with_title("RVM");
     let window = match window_builder.build(&event_loop) {
         Ok(win) => Arc::new(win),
-        Err(err) => { println!("Window create error: {}", err); return; }
+        Err(err) => { println!("Window creating error: {}", err); return; }
     };
 
     let instance = match create_vulkan_instance() {
         Ok(inst) => inst,
-        Err(err) => { println!("Vulkan instance create error: {}", err); return; }
+        Err(err) => { println!("Vulkan instance creating error: {}", err); return; }
     };
 
     let surface = match vulkano_win::create_surface_from_winit(window.clone(), instance.clone()) {
         Ok(surface) => surface,
-        Err(err) => { println!("Surface create error: {}", err); return; }
+        Err(err) => { println!("Surface creating error: {}", err); return; }
     };
 
     let physical_devices = match get_right_devices(instance.clone()) {
@@ -251,20 +304,28 @@ fn main() {
         Err(err) => { println!("Physical devices error: {}", err); return; }
     };
 
-    let (device, _) = match create_device_connection(physical_devices[0].clone()) {
+    let (device, queues) = match create_device_connection(physical_devices[0].clone()) {
         Ok(device) => device,
-        Err(err) => { println!("Device create error: {}", err); return; }
+        Err(err) => { println!("Device creating error: {}", err); return; }
     };
 
     let win32_monitor = get_app_monitor(window.clone());
     let (mut swapchain, mut images) = match create_swapchain(surface, device.clone(), win32_monitor) {
         Ok(swapchain_images) => swapchain_images,
-        Err(err) => { println!("Swapchain create error: {}", err); return; }
+        Err(err) => { println!("Swapchain creating error: {}", err); return; }
+    };
+
+    let render_pass = match create_render_pass(device.clone(), swapchain.image_format()) {
+        Ok(render_pass) => render_pass,
+        Err(err) => { println!("RenderPass creating error: {}", err); return; }
+    };
+
+    let mut framebuffers = match create_framebuffers(render_pass.clone(), &images) {
+        Ok(framebuffers) => framebuffers,
+        Err(err) => { println!("Framebuffers creating error: {}", err); return; }
     };
 
 
-
-    
 
     // Стандартный распределитель, подходит для большинства выделений
     let free_list_memory_allocator = GenericMemoryAllocator::<Arc<FreeListAllocator>>::new_default(device.clone());
@@ -321,7 +382,6 @@ fn main() {
         Format::R8G8B8A8_SRGB
     ).unwrap();
     let bump_image_view = ImageView::new_default(bump_attachment_image.clone());
-    println!("{}", byte_size((bump_attachment_image.dimensions().num_texels() * 4) as u64));
 
     // let pool_buffer = CpuAccessibleBuffer::from_iter(
     //     &pool_memory_allocator,
@@ -400,7 +460,11 @@ fn main() {
                         renderer.resize();
                         match recreate_swapchain(swapchain.clone(), window.clone()) {
                             Ok(si) => { swapchain = si.0; images = si.1; },
-                            Err(err) => { println!("Swapchain recreate error: {}", err) }
+                            Err(err) => println!("Swapchain recreating error: {}", err)
+                        };
+                        match create_framebuffers(render_pass.clone(), &images) {
+                            Ok(fb) => framebuffers = fb,
+                            Err(err) => println!("Framebuffers recreating error: {}", err)
                         };
                     }
                     WindowEvent::ScaleFactorChanged { .. } => {

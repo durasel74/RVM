@@ -112,17 +112,6 @@ fn main() {
     let descriptor_allocator = StandardDescriptorSetAllocator::new(device.clone());
     let queue = queues.next().unwrap();
 
-    let shader = cs::load(device.clone())
-        .expect("failed to create shader module");
-
-    let compute_pipeline = ComputePipeline::new(
-        device.clone(),
-        shader.entry_point("main").unwrap(),
-        &(),
-        None,
-        |_| {},
-    ).expect("failed to create compute pipeline");
-
     let (swapchain, images) = Swapchain::new(
         device.clone(),
         surface.clone(),
@@ -158,17 +147,16 @@ fn main() {
     )
     .unwrap();
 
-    let data = (0..1).map(|_| 0.0f32);
-    let buffer = CpuAccessibleBuffer::from_iter(
-        &memory_allocator,
-        BufferUsage {
-            storage_buffer: true,
-            ..Default::default()
-        },
-        false,
-        data,
-    )
-    .expect("failed to create buffer");
+    let shader = cs::load(device.clone())
+        .expect("failed to create shader module");
+
+    let compute_pipeline = ComputePipeline::new(
+        device.clone(),
+        shader.entry_point("main").unwrap(),
+        &(),
+        None,
+        |_| {},
+    ).expect("failed to create compute pipeline");
 
     let mut sets = vec![];
     let framebuffers = images
@@ -239,6 +227,18 @@ fn main() {
             Arc::new(builder.build().unwrap())
         })
         .collect::<Vec<_>>();
+
+    let data = (0..1).map(|_| 0.0f32);
+    let buffer = CpuAccessibleBuffer::from_iter(
+        &memory_allocator,
+        BufferUsage {
+            storage_buffer: true,
+            ..Default::default()
+        },
+        false,
+        data,
+    )
+    .expect("failed to create buffer");
 
     let now = Instant::now();
     let mut old_since_time = now.elapsed().as_millis();
