@@ -21,12 +21,13 @@ impl InstanceInitInfo {
 impl Default for InstanceInitInfo {
     fn default() -> Self {
         let required_extensions = InstanceExtensions {
+            khr_get_surface_capabilities2: true,
             khr_surface: true,
             khr_win32_surface: true,
-            khr_get_surface_capabilities2: true,
             ..InstanceExtensions::empty()
         };
         let preferred_extensions = InstanceExtensions {
+            khr_get_physical_device_properties2: true,
             ..InstanceExtensions::empty()
         };
         InstanceInitInfo { required_extensions, preferred_extensions }

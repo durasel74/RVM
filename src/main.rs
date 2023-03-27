@@ -2,9 +2,9 @@
 
 mod instance_init_info;
 mod device_init_info;
+mod shader_module;
 use instance_init_info::InstanceInitInfo;
 use device_init_info::DeviceInitInfo;
-use winit::platform::windows::WindowExtWindows;
 
 use std::error::Error;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use std::mem::{ size_of, size_of_val };
 use winit::event::{ Event, WindowEvent, StartCause };
 use winit::event_loop::{ ControlFlow, EventLoop, DeviceEventFilter };
 use winit::window::WindowBuilder;
+use winit::platform::windows::WindowExtWindows;
 
 use vulkano::{ VulkanLibrary, VulkanError };
 use vulkano::instance::{ Instance, InstanceCreateInfo };
@@ -32,9 +33,15 @@ use vulkano::swapchain::{ Surface, SurfaceInfo, SurfaceCapabilities, Win32Monito
 use vulkano::render_pass::{ RenderPass, RenderPassCreateInfo, RenderPassCreationError, 
     SubpassDescription, AttachmentDescription, AttachmentReference, LoadOp, StoreOp, 
     Framebuffer, FramebufferCreateInfo, FramebufferCreationError };
+use vulkano::pipeline::{ Pipeline, ComputePipeline };
+use vulkano::shader::spirv::SpirvError;
+use vulkano::descriptor_set::{ PersistentDescriptorSet, WriteDescriptorSet };
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+
 
 use egui_winit_vulkano::Gui;
 use vulkano_win::VkSurfaceBuild;
+use vulkano_shaders;
 use vulkano_util::context::{ VulkanoConfig, VulkanoContext };
 use vulkano_util::window::{ VulkanoWindows, WindowDescriptor };
 //use egui::{ ScrollArea, TextEdit, TextStyle, Label };
@@ -196,13 +203,17 @@ fn create_swapchain(surface: Arc<Surface>, device: Arc<Device>, monitor: Option<
         Some(limit) => cmp::min(cmp::max(3, surface_capabilities.min_image_count), limit)
     };
     let image_usage = ImageUsage {
-        //storage: true,
+        storage: true,
         color_attachment: true,
         .. ImageUsage::empty()
     };
-    let image_format = *image_formats.iter()
-        .find(|f| **f == Format::B8G8R8A8_SRGB)
-        .unwrap_or(&image_formats[0]);
+
+
+    // let image_format = *image_formats.iter()
+    //     .find(|f| **f == Format::B8G8R8A8_SRGB)
+    //     .unwrap_or(&image_formats[0]);
+    let image_format = find_correct_image_format_by_device(device.clone(), &image_formats);
+    println!("{:?}", image_format);
 
     let swapchain_images = Swapchain::new(
         device.clone(),
@@ -230,6 +241,22 @@ fn recreate_swapchain(swapchain: Arc<Swapchain>, window: Arc<winit::window::Wind
         ..swapchain.create_info()
     })?;
     Ok(swapchain_images)
+}
+
+fn find_correct_image_format_by_device(device: Arc<Device>, image_formats: &Vec<Format>) -> Format {
+    for format in image_formats {
+        let prop = if let Ok(p) = device.physical_device()
+            .format_properties(format.clone()) { p } else { continue };
+        let is_storage = prop.optimal_tiling_features.storage_image;
+        if is_storage && format == &Format::B8G8R8A8_SRGB { return format.clone(); }
+    }
+    for format in image_formats {
+        let prop = if let Ok(p) = device.physical_device()
+            .format_properties(format.clone()) { p } else { continue };
+        let is_storage = prop.optimal_tiling_features.storage_image;
+        if is_storage { return format.clone() }
+    }
+    image_formats[0]
 }
 
 fn create_render_pass(device: Arc<Device>, image_format: Format) 
@@ -281,6 +308,21 @@ fn create_framebuffers(render_pass: Arc<RenderPass>, images: &Vec<Arc<SwapchainI
     Ok(result)
 }
 
+fn create_pipeline(device: Arc<Device>) -> Result<Arc<ComputePipeline>, Box<dyn Error>> {
+    let shader = shader_module::cs::load(device.clone())?;
+    let entry_point = if let Some(ep) = shader.entry_point("main") { ep }
+    else { return Err(Box::new(SpirvError::InvalidHeader)) };
+    
+    let pipeline = ComputePipeline::new(
+        device.clone(),
+        entry_point,
+        &(),
+        None,     // Добавить кеш!!!
+        |_| {}
+    )?;
+    Ok(pipeline)
+}
+
 fn main() {
     let event_loop = EventLoop::new();
     let window_builder = WindowBuilder::new().with_title("RVM");
@@ -324,6 +366,27 @@ fn main() {
         Ok(framebuffers) => framebuffers,
         Err(err) => { println!("Framebuffers creating error: {}", err); return; }
     };
+
+    let pipeline = match create_pipeline(device.clone()) {
+        Ok(pipline) => pipline,
+        Err(err) => { println!("Pipeline creating error: {}", err); return; }
+    };
+    
+
+    
+    
+    let descriptor_allocator = StandardDescriptorSetAllocator::new(device.clone());
+    let layout = pipeline.layout().set_layouts().get(0).unwrap();
+
+    let set = PersistentDescriptorSet::new(
+        &descriptor_allocator,
+        layout.clone(),
+        [
+            WriteDescriptorSet::image_view(0, framebuffers[0].attachments()[0].clone())
+        ]
+    ).unwrap();
+
+
 
 
 
