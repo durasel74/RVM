@@ -18,11 +18,15 @@ use winit::platform::windows::WindowExtWindows;
 
 use vulkano::{ VulkanLibrary, VulkanError };
 use vulkano::instance::{ Instance, InstanceCreateInfo };
-use vulkano::device::physical::{ PhysicalDevice, PhysicalDeviceType, PhysicalDeviceError };
+use vulkano::device::physical::{ PhysicalDevice, PhysicalDeviceType, 
+    PhysicalDeviceError };
 use vulkano::device::{ Device, DeviceCreateInfo, QueueCreateInfo, Queue };
-use vulkano::memory::allocator::{ GenericMemoryAllocator, GenericMemoryAllocatorCreateInfo, AllocationType, MemoryUsage };
-use vulkano::memory::allocator::suballocator::{ FreeListAllocator, BumpAllocator, PoolAllocator, BuddyAllocator };
-use vulkano::buffer::{ BufferUsage, BufferAccess, CpuAccessibleBuffer, CpuBufferPool, DeviceLocalBuffer };
+use vulkano::memory::allocator::{ GenericMemoryAllocator, 
+    GenericMemoryAllocatorCreateInfo, AllocationType, MemoryUsage };
+use vulkano::memory::allocator::suballocator::{ FreeListAllocator, BumpAllocator, 
+    PoolAllocator, BuddyAllocator };
+use vulkano::buffer::{ BufferUsage, BufferAccess, CpuAccessibleBuffer, 
+    CpuBufferPool, DeviceLocalBuffer };
 use vulkano::image::{ AttachmentImage, SwapchainImage, ImageAccess, ImageUsage, 
     ImageLayout, SampleCount };
 use vulkano::image::view::ImageView;
@@ -33,10 +37,14 @@ use vulkano::swapchain::{ Surface, SurfaceInfo, SurfaceCapabilities, Win32Monito
 use vulkano::render_pass::{ RenderPass, RenderPassCreateInfo, RenderPassCreationError, 
     SubpassDescription, AttachmentDescription, AttachmentReference, LoadOp, StoreOp, 
     Framebuffer, FramebufferCreateInfo, FramebufferCreationError };
-use vulkano::pipeline::{ Pipeline, ComputePipeline };
+use vulkano::pipeline::{ Pipeline, ComputePipeline, PipelineBindPoint };
 use vulkano::shader::spirv::SpirvError;
 use vulkano::descriptor_set::{ PersistentDescriptorSet, WriteDescriptorSet };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::command_buffer::allocator::{ StandardCommandBufferAllocator, 
+    StandardCommandBufferAllocatorCreateInfo };
+use vulkano::command_buffer::{ AutoCommandBufferBuilder, CommandBufferUsage, 
+    PrimaryAutoCommandBuffer };
 
 
 use egui_winit_vulkano::Gui;
@@ -135,6 +143,31 @@ fn get_physical_device_local_memory(physical_device: Arc<PhysicalDevice>) -> u64
     local_memory
 }
 
+fn get_device_queue_create_infos(physical_device: Arc<PhysicalDevice>)
+-> Result<Vec<QueueCreateInfo>, Box<dyn Error>> {
+    let queue_family_properties = physical_device.queue_family_properties();
+
+    let mut queue_family_indices: Vec<u32> = vec![];
+    for (i, q) in queue_family_properties.iter().enumerate() {
+        if q.queue_flags.compute && q.queue_flags.transfer {
+            queue_family_indices.push(i as u32);
+        }
+    }
+    if queue_family_indices.len() < 1 {
+        return Err(Box::new(VulkanError::InitializationFailed));
+    }
+
+    let queue_create_infos = queue_family_indices.into_iter()
+    .map(|queue_family_index| {
+        QueueCreateInfo {
+            queue_family_index,
+            ..Default::default()
+        }
+    }).collect();
+
+    Ok(queue_create_infos)
+}
+
 fn create_device_connection(physical_device: Arc<PhysicalDevice>)
 -> Result<(Arc<Device>, Vec<Arc<Queue>>), Box<dyn Error>> {
     let supported_extensions = physical_device.supported_extensions();
@@ -143,24 +176,14 @@ fn create_device_connection(physical_device: Arc<PhysicalDevice>)
     let supported_features = physical_device.supported_features();
     let enabled_features = DeviceInitInfo::default().confirm_features(supported_features)?;
 
-    let queue_create_info = QueueCreateInfo {
-        queue_family_index: 0,
-        ..Default::default()
-    };
-
-    // let queue_family_index = physical_device
-    //     .queue_family_properties()
-    //     .iter()
-    //     .enumerate()
-    //     .position(|(_, q)| q.queue_flags.graphics)
-    //     .expect("couldn't find a graphical queue family") as u32;
+    let queue_create_infos = get_device_queue_create_infos(physical_device.clone())?;
 
     let (device, queues) = Device::new(
         physical_device,
         DeviceCreateInfo {
             enabled_extensions,
             enabled_features,
-            queue_create_infos: vec![queue_create_info],
+            queue_create_infos,
             ..Default::default()
         }
     )?;
@@ -207,15 +230,9 @@ fn create_swapchain(surface: Arc<Surface>, device: Arc<Device>, monitor: Option<
         color_attachment: true,
         .. ImageUsage::empty()
     };
-
-
-    // let image_format = *image_formats.iter()
-    //     .find(|f| **f == Format::B8G8R8A8_SRGB)
-    //     .unwrap_or(&image_formats[0]);
     let image_format = find_correct_image_format_by_device(device.clone(), &image_formats);
-    println!("{:?}", image_format);
 
-    let swapchain_images = Swapchain::new(
+    let swapchain_and_images = Swapchain::new(
         device.clone(),
         surface,
         SwapchainCreateInfo {
@@ -231,7 +248,7 @@ fn create_swapchain(surface: Arc<Surface>, device: Arc<Device>, monitor: Option<
             ..Default::default()
         }
     )?;
-    Ok(swapchain_images)
+    Ok(swapchain_and_images)
 }
 
 fn recreate_swapchain(swapchain: Arc<Swapchain>, window: Arc<winit::window::Window>) 
@@ -244,11 +261,25 @@ fn recreate_swapchain(swapchain: Arc<Swapchain>, window: Arc<winit::window::Wind
 }
 
 fn find_correct_image_format_by_device(device: Arc<Device>, image_formats: &Vec<Format>) -> Format {
+    // Убрать!!!!!!!!!!!!!!!!!!!
+    for format in image_formats {
+        let prop = if let Ok(p) = device.physical_device()
+            .format_properties(format.clone()) { p } else { continue };
+        let is_storage = prop.optimal_tiling_features.storage_image;
+        if is_storage && format == &Format::R8G8B8A8_UNORM { return format.clone(); }
+    }
+
     for format in image_formats {
         let prop = if let Ok(p) = device.physical_device()
             .format_properties(format.clone()) { p } else { continue };
         let is_storage = prop.optimal_tiling_features.storage_image;
         if is_storage && format == &Format::B8G8R8A8_SRGB { return format.clone(); }
+    }
+    for format in image_formats {
+        let prop = if let Ok(p) = device.physical_device()
+            .format_properties(format.clone()) { p } else { continue };
+        let is_storage = prop.optimal_tiling_features.storage_image;
+        if is_storage && format == &Format::B8G8R8A8_SNORM { return format.clone(); }
     }
     for format in image_formats {
         let prop = if let Ok(p) = device.physical_device()
@@ -292,10 +323,10 @@ fn create_render_pass(device: Arc<Device>, image_format: Format)
 }
 
 fn create_framebuffers(render_pass: Arc<RenderPass>, images: &Vec<Arc<SwapchainImage>>)
--> Result<Vec<Arc<Framebuffer>>, FramebufferCreationError> {
+-> Result<Vec<Arc<Framebuffer>>, Box<dyn Error>> {
     let mut result = vec![];
     for image in images {
-        let view = ImageView::new_default(image.clone()).unwrap();
+        let view = ImageView::new_default(image.clone())?;
         let framebuffer = Framebuffer::new(
             render_pass.clone(),
             FramebufferCreateInfo {
@@ -321,6 +352,61 @@ fn create_pipeline(device: Arc<Device>) -> Result<Arc<ComputePipeline>, Box<dyn 
         |_| {}
     )?;
     Ok(pipeline)
+}
+
+fn create_descriptor_sets_for_swapchain(
+    descriptor_allocator: &StandardDescriptorSetAllocator,
+    pipeline: Arc<ComputePipeline>,
+    images: &Vec<Arc<SwapchainImage>>) 
+-> Result<Vec<Arc<PersistentDescriptorSet>>, Box<dyn Error>> {
+
+    let mut result = vec![];
+    for image in images {
+        let view = ImageView::new_default(image.clone())?;
+
+        let descriptor_set_layout = pipeline.layout().set_layouts().get(0)
+            .expect("DescriptorSetLayout not found by index 0");
+        let descriptor_set = PersistentDescriptorSet::new(
+            descriptor_allocator,
+            descriptor_set_layout.clone(),
+            [
+                WriteDescriptorSet::image_view(0, view.clone())
+            ]
+        )?;
+        result.push(descriptor_set);
+    }
+    Ok(result)
+}
+
+fn create_render_command_buffers(
+    command_buffer_allocator: &StandardCommandBufferAllocator,
+    pipeline: Arc<ComputePipeline>,
+    queue_family_index: u32,
+    descriptor_sets: &Vec<Arc<PersistentDescriptorSet>>,
+    extent: (u32, u32),)
+-> Result<Vec<Arc<PrimaryAutoCommandBuffer>>, Box<dyn Error>> {
+
+    let mut command_buffers = vec![];
+    for set in descriptor_sets {
+        let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
+            command_buffer_allocator,
+            queue_family_index,
+            CommandBufferUsage::SimultaneousUse
+        )?;
+
+        command_buffer_builder.bind_pipeline_compute(pipeline.clone())
+            .bind_descriptor_sets(
+                PipelineBindPoint::Compute,
+                pipeline.layout().clone(),
+                0,
+                vec![set.clone()]
+            )
+            .dispatch([extent.0 / 16, extent.1 / 16, 1])?;
+
+        let command_buffer = command_buffer_builder.build()?;
+        command_buffers.push(Arc::new(command_buffer));
+    };
+    Ok(command_buffers)
 }
 
 fn main() {
@@ -367,110 +453,51 @@ fn main() {
         Err(err) => { println!("Framebuffers creating error: {}", err); return; }
     };
 
-    let pipeline = match create_pipeline(device.clone()) {
-        Ok(pipline) => pipline,
+    let mut pipeline = match create_pipeline(device.clone()) {
+        Ok(pipeline) => pipeline,
         Err(err) => { println!("Pipeline creating error: {}", err); return; }
     };
-    
 
-    
-    
+
     let descriptor_allocator = StandardDescriptorSetAllocator::new(device.clone());
-    let layout = pipeline.layout().set_layouts().get(0).unwrap();
-
-    let set = PersistentDescriptorSet::new(
-        &descriptor_allocator,
-        layout.clone(),
-        [
-            WriteDescriptorSet::image_view(0, framebuffers[0].attachments()[0].clone())
-        ]
-    ).unwrap();
-
-
-
-
-
-    // Стандартный распределитель, подходит для большинства выделений
-    let free_list_memory_allocator = GenericMemoryAllocator::<Arc<FreeListAllocator>>::new_default(device.clone());
-
-    // Лучше подходит для выделений на очень короткий период с полным сбросом
-    let bump_memory_allocator = Arc::new(GenericMemoryAllocator::<Arc<BumpAllocator>>::new_default(device.clone()));
-
-    // // Лучше подходит для одинаковых выделений
-    // let pool_memory_allocator = GenericMemoryAllocator::<Arc<PoolAllocator<{ 64 * 1024 }>>>::new(
-    //     device.clone(),
-    //     GenericMemoryAllocatorCreateInfo {
-    //         block_sizes: &[(0, 64 * 1024 * 1024)],
-    //         allocation_type: AllocationType::Linear,
-    //         ..Default::default()
-    //     },
-    // ).unwrap();
-
-    // // Может подойти для выделения большого количества изображений разных размеров?
-    // let buddy_memory_allocator = GenericMemoryAllocator::<Arc<BuddyAllocator>>::new(
-    //     device.clone(),
-    //     GenericMemoryAllocatorCreateInfo {
-    //         block_sizes: &[(0, 64 * 1024 * 1024)],
-    //         ..Default::default()
-    //     },
-    // )
-    // .unwrap();
-
-    let data: Vec<i32> = (0..99_999).collect();
-
-    let free_list_local_buffer = DeviceLocalBuffer::<i32>::new(
-        &free_list_memory_allocator,
-        BufferUsage {
-            transfer_dst: true,
-            storage_buffer: true,
+    let command_buffer_allocator = StandardCommandBufferAllocator::new(
+        device.clone(), 
+        StandardCommandBufferAllocatorCreateInfo {
+            primary_buffer_count: 50,
+            secondary_buffer_count: 50,
             ..Default::default()
-        },
-        device.active_queue_family_indices().iter().copied()
-    ).unwrap();
-    //println!("{}", byte_size(free_list_local_buffer.size() / 8));
-
-    let bump_buffer = CpuBufferPool::new(
-        Arc::new(bump_memory_allocator.clone()),
-        BufferUsage {
-            storage_buffer: true,
-            ..Default::default()
-        },
-        MemoryUsage::Upload,
+        }
     );
-    bump_buffer.from_iter(data.clone()).unwrap();
 
-    let bump_attachment_image = AttachmentImage::new(
-        &bump_memory_allocator,
-        [800, 600],
-        Format::R8G8B8A8_SRGB
-    ).unwrap();
-    let bump_image_view = ImageView::new_default(bump_attachment_image.clone());
 
-    // let pool_buffer = CpuAccessibleBuffer::from_iter(
-    //     &pool_memory_allocator,
-    //     BufferUsage {
-    //         storage_buffer: true,
-    //         ..Default::default()
-    //     },
-    //     false,
-    //     data.clone()
-    // ).unwrap();
-    // println!("{}", ByteSize(pool_buffer.size()));
+    let mut descriptor_sets = match create_descriptor_sets_for_swapchain(
+        &descriptor_allocator, 
+        pipeline.clone(), 
+        &images
+    ) {
+        Ok(sets) => sets,
+        Err(err) => { println!("Descriptor sets creating error: {}", err); return; }
+    };
 
-    // let buddy_buffer = CpuAccessibleBuffer::from_iter(
-    //     &buddy_memory_allocator,
-    //     BufferUsage {
-    //         storage_buffer: true,
-    //         ..Default::default()
-    //     },
-    //     false,
-    //     data.clone()
-    // ).unwrap();
-    // println!("{}", ByteSize(buddy_buffer.size()));
+    let mut command_buffers = match create_render_command_buffers(
+        &command_buffer_allocator,
+        pipeline.clone(), 
+        queues[0].queue_family_index(), 
+        &descriptor_sets,
+        (window.inner_size().width, window.inner_size().height)
+    ) {
+        Ok(command_buffers) => command_buffers,
+        Err(err) => { println!("Command buffers creating error: {}", err); return; }
+    };
 
 
 
 
+
+
+
+
+    let images_format = swapchain.image_format();
 
     // Vulkano context
     let context = VulkanoContext::new(VulkanoConfig::default());
@@ -487,7 +514,7 @@ fn main() {
             renderer.surface(),
             Some(vulkano::format::Format::B8G8R8A8_SRGB),
             renderer.graphics_queue(),
-            false,
+            true,
         )
     };
 
@@ -529,6 +556,28 @@ fn main() {
                             Ok(fb) => framebuffers = fb,
                             Err(err) => println!("Framebuffers recreating error: {}", err)
                         };
+                        match create_pipeline(device.clone()) {
+                            Ok(pe) => pipeline = pe,
+                            Err(err) => { println!("Pipeline recreating error: {}", err); return; }
+                        };
+                        match create_descriptor_sets_for_swapchain(
+                            &descriptor_allocator, 
+                            pipeline.clone(), 
+                            &images
+                        ) {
+                            Ok(ds) => descriptor_sets = ds,
+                            Err(err) => { println!("Descriptor sets recreating error: {}", err); return; }
+                        };
+                        match create_render_command_buffers(
+                            &command_buffer_allocator,
+                            pipeline.clone(), 
+                            queues[0].queue_family_index(), 
+                            &descriptor_sets,
+                            (window.inner_size().width, window.inner_size().height)
+                        ) {
+                            Ok(cb) => command_buffers = cb,
+                            Err(err) => { println!("Command buffers recreating error: {}", err); return; }
+                        };
                     }
                     WindowEvent::ScaleFactorChanged { .. } => {
                         renderer.resize();
@@ -558,6 +607,7 @@ fn main() {
                             });
                             ui.vertical(|ui| {
                                 show_device_info(ui, device.clone());
+                                show_queues_info(ui, &queues);
                                 show_swapchain_info(ui, swapchain.clone());
                             });
                         });
@@ -857,6 +907,31 @@ fn show_device_info(ui: &mut egui::Ui, device: Arc<Device>) {
                 ui.set_min_width(530.0 * UI_SIZE);
                 sized_text(ui, format!("{:?}", device.enabled_features()), 20.0 * UI_SIZE);
             });
+        });
+    });
+}
+
+fn show_queues_info(ui: &mut egui::Ui, queues: &Vec<Arc<Queue>>) {
+    egui::Frame::none()
+    .fill(egui::Color32::from_rgb(180, 180, 180))
+    .outer_margin(egui::style::Margin::same(5.0 * UI_SIZE))
+    .inner_margin(egui::style::Margin::same(10.0 * UI_SIZE))
+    .show(ui, |ui| {
+        ui.set_max_size(egui::vec2(550.0 * UI_SIZE, 370.0 * UI_SIZE));
+        ui.vertical_centered(|ui| {
+            sized_text(ui, format!("Queues"), 26.0 * UI_SIZE);
+        });
+
+        sized_text(ui, format!("Info:"), 18.0 * UI_SIZE);
+        egui::Frame::none()
+        .fill(egui::Color32::from_rgb(160, 160, 160))
+        .inner_margin(egui::style::Margin::same(10.0 * UI_SIZE))
+        .show(ui, |ui| {
+            ui.set_min_width(530.0 * UI_SIZE);
+            for queue in queues {
+                sized_text(ui, format!("Queue family_index: {} Queue index: {}", 
+                    queue.queue_family_index(), queue.id_within_family()), 20.0 * UI_SIZE);
+            }
         });
     });
 }
