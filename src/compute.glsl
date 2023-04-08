@@ -29,6 +29,10 @@ void main() {
         }
     }
 
-    vec4 to_write = vec4(vec3(i), 1.0);
+    float rc = sin(z.x * z.x - z.y * z.y + c.y);
+    float gc = cos(z.x * z.x - z.y * z.y + c.x);
+    float bc = tan(z.x * z.x - z.y * z.y + c.x * c.y);
+
+    vec4 to_write = vec4(rc, gc, bc, 1.0);
     imageStore(img, ivec2(gl_GlobalInvocationID.xy), to_write);
 }

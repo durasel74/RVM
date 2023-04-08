@@ -10,11 +10,14 @@ use std::error::Error;
 use std::sync::Arc;
 use std::cmp;
 use std::mem::{ size_of, size_of_val };
+use std::time::{ self, Instant };
 
-use winit::event::{ Event, WindowEvent, StartCause };
+use winit::event::{ Event, WindowEvent, StartCause, KeyboardInput, ScanCode, 
+    DeviceEvent, ElementState };
 use winit::event_loop::{ ControlFlow, EventLoop, DeviceEventFilter };
 use winit::window::WindowBuilder;
 use winit::platform::windows::WindowExtWindows;
+use winit::dpi::PhysicalSize;
 
 use vulkano::{ VulkanLibrary, VulkanError };
 use vulkano::instance::{ Instance, InstanceCreateInfo };
@@ -29,11 +32,11 @@ use vulkano::buffer::{ BufferUsage, BufferAccess, CpuAccessibleBuffer,
     CpuBufferPool, DeviceLocalBuffer };
 use vulkano::image::{ AttachmentImage, SwapchainImage, ImageAccess, ImageUsage, 
     ImageLayout, SampleCount };
-use vulkano::image::view::ImageView;
+use vulkano::image::view::{ ImageView, ImageViewCreationError };
 use vulkano::format::Format;
-use vulkano::swapchain::{ Surface, SurfaceInfo, SurfaceCapabilities, Win32Monitor,
+use vulkano::swapchain::{ self, Surface, SurfaceInfo, SurfaceCapabilities, Win32Monitor,
     ColorSpace, PresentMode, FullScreenExclusive, Swapchain, SwapchainCreateInfo, 
-    SwapchainCreationError };
+    SwapchainPresentInfo, SwapchainCreationError, AcquireError };
 use vulkano::render_pass::{ RenderPass, RenderPassCreateInfo, RenderPassCreationError, 
     SubpassDescription, AttachmentDescription, AttachmentReference, LoadOp, StoreOp, 
     Framebuffer, FramebufferCreateInfo, FramebufferCreationError };
@@ -45,13 +48,12 @@ use vulkano::command_buffer::allocator::{ StandardCommandBufferAllocator,
     StandardCommandBufferAllocatorCreateInfo };
 use vulkano::command_buffer::{ AutoCommandBufferBuilder, CommandBufferUsage, 
     PrimaryAutoCommandBuffer };
+use vulkano::sync::{ self, GpuFuture, FlushError };
 
 
 use egui_winit_vulkano::Gui;
 use vulkano_win::VkSurfaceBuild;
 use vulkano_shaders;
-use vulkano_util::context::{ VulkanoConfig, VulkanoContext };
-use vulkano_util::window::{ VulkanoWindows, WindowDescriptor };
 //use egui::{ ScrollArea, TextEdit, TextStyle, Label };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -354,23 +356,31 @@ fn create_pipeline(device: Arc<Device>) -> Result<Arc<ComputePipeline>, Box<dyn 
     Ok(pipeline)
 }
 
+fn create_images_views(images: &Vec<Arc<SwapchainImage>>) 
+-> Result<Vec<Arc<ImageView<SwapchainImage>>>, ImageViewCreationError> {
+    let mut images_views = vec![];
+    for image in images {
+        let view = ImageView::new_default(image.clone())?;
+        images_views.push(view);
+    }
+    Ok(images_views)
+}
+
 fn create_descriptor_sets_for_swapchain(
     descriptor_allocator: &StandardDescriptorSetAllocator,
     pipeline: Arc<ComputePipeline>,
-    images: &Vec<Arc<SwapchainImage>>) 
+    images_views: &Vec<Arc<ImageView<SwapchainImage>>>) 
 -> Result<Vec<Arc<PersistentDescriptorSet>>, Box<dyn Error>> {
 
     let mut result = vec![];
-    for image in images {
-        let view = ImageView::new_default(image.clone())?;
-
+    for image_view in images_views {
         let descriptor_set_layout = pipeline.layout().set_layouts().get(0)
             .expect("DescriptorSetLayout not found by index 0");
         let descriptor_set = PersistentDescriptorSet::new(
             descriptor_allocator,
             descriptor_set_layout.clone(),
             [
-                WriteDescriptorSet::image_view(0, view.clone())
+                WriteDescriptorSet::image_view(0, image_view.clone())
             ]
         )?;
         result.push(descriptor_set);
@@ -411,7 +421,9 @@ fn create_render_command_buffers(
 
 fn main() {
     let event_loop = EventLoop::new();
-    let window_builder = WindowBuilder::new().with_title("RVM");
+    let window_builder = WindowBuilder::new()
+        .with_title("RVM")
+        .with_inner_size(PhysicalSize::new(1000, 800));
     let window = match window_builder.build(&event_loop) {
         Ok(win) => Arc::new(win),
         Err(err) => { println!("Window creating error: {}", err); return; }
@@ -436,9 +448,10 @@ fn main() {
         Ok(device) => device,
         Err(err) => { println!("Device creating error: {}", err); return; }
     };
+    let main_queue = queues[0].clone();
 
     let win32_monitor = get_app_monitor(window.clone());
-    let (mut swapchain, mut images) = match create_swapchain(surface, device.clone(), win32_monitor) {
+    let (mut swapchain, mut images) = match create_swapchain(surface.clone(), device.clone(), win32_monitor) {
         Ok(swapchain_images) => swapchain_images,
         Err(err) => { println!("Swapchain creating error: {}", err); return; }
     };
@@ -470,10 +483,15 @@ fn main() {
     );
 
 
+    let mut images_views = match create_images_views(&images) {
+        Ok(views) => views,
+        Err(err) => { println!("Images views creating error: {}", err); return; }
+    };
+
     let mut descriptor_sets = match create_descriptor_sets_for_swapchain(
         &descriptor_allocator, 
         pipeline.clone(), 
-        &images
+        &images_views
     ) {
         Ok(sets) => sets,
         Err(err) => { println!("Descriptor sets creating error: {}", err); return; }
@@ -482,7 +500,7 @@ fn main() {
     let mut command_buffers = match create_render_command_buffers(
         &command_buffer_allocator,
         pipeline.clone(), 
-        queues[0].queue_family_index(), 
+        main_queue.queue_family_index(), 
         &descriptor_sets,
         (window.inner_size().width, window.inner_size().height)
     ) {
@@ -491,63 +509,29 @@ fn main() {
     };
 
 
+    let mut gui = Gui::new(
+        &event_loop,
+        surface.clone(),
+        Some(swapchain.image_format()),
+        main_queue.clone(),
+        true
+    );
+    let mut is_show_infos = false;
 
-
-
-
-
-
-    let images_format = swapchain.image_format();
-
-    // Vulkano context
-    let context = VulkanoContext::new(VulkanoConfig::default());
-    // Vulkano windows (create one)
-    let mut windows = VulkanoWindows::default();
-    windows.create_window(&event_loop, &context, &WindowDescriptor::default(), |ci| {
-        ci.image_format = Some(vulkano::format::Format::B8G8R8A8_SRGB)
-    });
-    // Create gui as main render pass (no overlay means it clears the image each frame)
-    let mut gui = {
-        let renderer = windows.get_primary_renderer_mut().unwrap();
-        Gui::new(
-            &event_loop,
-            renderer.surface(),
-            Some(vulkano::format::Format::B8G8R8A8_SRGB),
-            renderer.graphics_queue(),
-            true,
-        )
-    };
-
+    let now = Instant::now();
+    let mut old_since_time = now.elapsed().as_millis();
     event_loop.run(move |event, _, control_flow| {
         //*control_flow = ControlFlow::Wait;
 
-        // match event {
-        //     Event::NewEvents(start_cause) => {},
-        //     Event::WindowEvent {
-        //         event: WindowEvent::CloseRequested,
-        //         window_id,
-        //     } if window_id == window.id() => control_flow.set_exit(),
+        // let since_time = now.elapsed().as_millis();
+        // let delta_time = (since_time - old_since_time) as f64;
 
-        //     Event::DeviceEvent { device_id, event } => {
-        //         // println!("{:?}", event)
-        //     }
-
-        //     Event::MainEventsCleared => {},
-        //     //Event::RedrawRequested(windowId) => {},
-        //     Event::RedrawEventsCleared => {},
-        //     Event::LoopDestroyed => {},
-        //     _ => (),
-        // }
-
-
-        let renderer = windows.get_primary_renderer_mut().unwrap();
         match event {
-            Event::WindowEvent { event, window_id }  => {
-                // Update Egui integration so the UI works!
+            Event::NewEvents(start_cause) => {},
+            Event::WindowEvent { event, window_id } if window_id == window.id() => {
                 let _pass_events_to_game = !gui.update(&event);
                 match event {
                     WindowEvent::Resized(_) => {
-                        renderer.resize();
                         match recreate_swapchain(swapchain.clone(), window.clone()) {
                             Ok(si) => { swapchain = si.0; images = si.1; },
                             Err(err) => println!("Swapchain recreating error: {}", err)
@@ -560,10 +544,14 @@ fn main() {
                             Ok(pe) => pipeline = pe,
                             Err(err) => { println!("Pipeline recreating error: {}", err); return; }
                         };
+                        match create_images_views(&images) {
+                            Ok(views) => images_views = views,
+                            Err(err) => { println!("Images views recreating error: {}", err); return; }
+                        };
                         match create_descriptor_sets_for_swapchain(
                             &descriptor_allocator, 
                             pipeline.clone(), 
-                            &images
+                            &images_views
                         ) {
                             Ok(ds) => descriptor_sets = ds,
                             Err(err) => { println!("Descriptor sets recreating error: {}", err); return; }
@@ -571,7 +559,7 @@ fn main() {
                         match create_render_command_buffers(
                             &command_buffer_allocator,
                             pipeline.clone(), 
-                            queues[0].queue_family_index(), 
+                            main_queue.queue_family_index(), 
                             &descriptor_sets,
                             (window.inner_size().width, window.inner_size().height)
                         ) {
@@ -580,20 +568,44 @@ fn main() {
                         };
                     }
                     WindowEvent::ScaleFactorChanged { .. } => {
-                        renderer.resize();
+                        //renderer.resize();
+                        // Пересоздать конвейер
                     }
                     WindowEvent::CloseRequested => {
                         *control_flow = ControlFlow::Exit;
                     }
-                    _ => (),
+                    _ => ()
                 }
             }
+            Event::DeviceEvent { device_id, event } => {
+                match event {
+                    DeviceEvent::Key(keyboard_input) => match keyboard_input {
+                        KeyboardInput { scancode: 1, state: ElementState::Released, ..} 
+                            => is_show_infos = !is_show_infos,
+                        _ => ()
+                    },
+                    _ => ()
+                }
+                // println!("{:?}", event)
+            }
+            //Event::RedrawRequested(window_id) if window_id == window_id => { }
 
-            Event::RedrawRequested(window_id) if window_id == window_id => {
-                // Set immediate UI in redraw here
+            Event::MainEventsCleared => {
+                // if delta_time > (1000.0 / 60.0)
+                let (image_index, suboptimal, acquire_future) =
+                match swapchain::acquire_next_image(swapchain.clone(), None) {
+                    Ok(r) => r,
+                    Err(AcquireError::OutOfDate) => { return; }
+                    Err(e) => panic!("Failed to acquire next image: {:?}", e),
+                };
+
+
+                
                 gui.immediate_ui(|gui| {
                     let ctx = gui.context();
-                    let frame = egui::Frame::none().fill(egui::Color32::from_rgb(80, 80, 80));
+                    if !is_show_infos { return }
+                    let frame = egui::Frame::none()
+                        .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150));
                     egui::CentralPanel::default().frame(frame).show(&ctx, |ui| {
                         ui.visuals_mut().collapsing_header_frame = true;
 
@@ -611,40 +623,44 @@ fn main() {
                                 show_swapchain_info(ui, swapchain.clone());
                             });
                         });
-                        
-                        
-                        // ui.separator();
-                        // ui.columns(2, |columns| {
-                        //     ScrollArea::vertical().id_source("source").show(
-                        //         &mut columns[0],
-                        //         |ui| {
-                        //             // ui.add(
-                        //             //     TextEdit::multiline(&mut code).font(TextStyle::Monospace),
-                        //             // );
-                        //         },
-                        //     );
-                        //     ScrollArea::vertical().id_source("rendered").show(
-                        //         &mut columns[1],
-                        //         |ui| {
-                        //             //egui_demo_lib::easy_mark::easy_mark(ui, &code);
-                        //         },
-                        //     );
-                        // });
                     });
                 });
-                // Render UI
-                // Acquire swapchain future
-                let before_future = renderer.acquire().unwrap();
-                // Render gui
-                let after_future =
-                    gui.draw_on_image(before_future, renderer.swapchain_image_view());
-                // Present swapchain
-                renderer.present(after_future, true);
-            }
 
-            Event::MainEventsCleared => {
-                renderer.window().request_redraw();
+
+
+                let exec_future = match sync::now(device.clone())
+                    .join(acquire_future)
+                    .then_execute(
+                        queues[0].clone(),
+                        command_buffers[image_index as usize].clone()
+                    ) {
+                        Ok(cbf) => cbf,
+                        Err(err) => return
+                    };
+
+                let ui_future = gui.draw_on_image(
+                    exec_future, 
+                    images_views[image_index as usize].clone()
+                );
+
+                let fence_future = ui_future
+                    .then_swapchain_present(
+                        queues[0].clone(),
+                        SwapchainPresentInfo::swapchain_image_index(
+                            swapchain.clone(), 
+                            image_index
+                        )
+                    )
+                    .then_signal_fence_and_flush();
+                
+                match fence_future {
+                    Ok(future) => { future.wait(None).unwrap(); }
+                    Err(FlushError::OutOfDate) => { return; }
+                    Err(e) => { println!("Failed to flush future: {:?}", e); }
+                }
             }
+            Event::RedrawEventsCleared => {},
+            Event::LoopDestroyed => {},
             _ => (),
         }
     });
