@@ -1,5 +1,3 @@
-//#![allow(non_snake_case)]
-
 mod instance_init_info;
 mod device_init_info;
 mod shader_module;
@@ -11,6 +9,8 @@ use std::sync::Arc;
 use std::cmp;
 use std::mem::{ size_of, size_of_val };
 use std::time::{ self, Instant };
+
+use bytemuck::{ Pod, Zeroable };
 
 use winit::event::{ Event, WindowEvent, StartCause, KeyboardInput, ScanCode, 
     DeviceEvent, ElementState };
@@ -30,6 +30,7 @@ use vulkano::memory::allocator::suballocator::{ FreeListAllocator, BumpAllocator
     PoolAllocator, BuddyAllocator };
 use vulkano::buffer::{ BufferUsage, BufferAccess, CpuAccessibleBuffer, 
     CpuBufferPool, DeviceLocalBuffer };
+use vulkano::buffer::cpu_pool::CpuBufferPoolSubbuffer;
 use vulkano::image::{ AttachmentImage, SwapchainImage, ImageAccess, ImageUsage, 
     ImageLayout, SampleCount };
 use vulkano::image::view::{ ImageView, ImageViewCreationError };
@@ -58,6 +59,25 @@ use vulkano_shaders;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const UI_SIZE: f32 = 0.7;
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone, Zeroable, Pod)]
+struct ViewPosition {
+    pub quality: u32,
+    pub zoom: f32,
+    pub pos_x: f32,
+    pub pos_y: f32
+}
+impl ViewPosition {
+    fn new() -> Self {
+        ViewPosition {
+            quality: 500,
+            zoom: 1.0,
+            pos_x: 0.0,
+            pos_y: 0.0
+        }
+    }
+}
 
 fn byte_size(byte: u64) -> String {
     let size_sign = ["B", "Kb", "Mb", "Gb"];
@@ -361,7 +381,8 @@ fn create_images_views(images: &Vec<Arc<SwapchainImage>>)
 fn create_descriptor_sets_for_swapchain(
     descriptor_allocator: &StandardDescriptorSetAllocator,
     pipeline: Arc<ComputePipeline>,
-    images_views: &Vec<Arc<ImageView<SwapchainImage>>>) 
+    images_views: &Vec<Arc<ImageView<SwapchainImage>>>,
+    view_pos_buffer: Arc<CpuAccessibleBuffer<ViewPosition>>) 
 -> Result<Vec<Arc<PersistentDescriptorSet>>, Box<dyn Error>> {
 
     let mut result = vec![];
@@ -372,7 +393,8 @@ fn create_descriptor_sets_for_swapchain(
             descriptor_allocator,
             descriptor_set_layout.clone(),
             [
-                WriteDescriptorSet::image_view(0, image_view.clone())
+                WriteDescriptorSet::image_view(0, image_view.clone()),
+                WriteDescriptorSet::buffer(1, view_pos_buffer.clone()),
             ]
         )?;
         result.push(descriptor_set);
@@ -463,7 +485,6 @@ fn main() {
         Err(err) => { println!("Pipeline creating error: {:?}", err); return; }
     };
 
-
     let descriptor_allocator = StandardDescriptorSetAllocator::new(device.clone());
     let command_buffer_allocator = StandardCommandBufferAllocator::new(
         device.clone(), 
@@ -473,6 +494,8 @@ fn main() {
             ..Default::default()
         }
     );
+    let free_list_memory_allocator = GenericMemoryAllocator::<Arc<FreeListAllocator>>
+        ::new_default(device.clone());
 
 
     let mut images_views = match create_images_views(&images) {
@@ -480,10 +503,23 @@ fn main() {
         Err(err) => { println!("Images views creating error: {:?}", err); return; }
     };
 
+    let mut view_position = ViewPosition::new();
+    let view_pos_buffer = CpuAccessibleBuffer::from_data(
+        &free_list_memory_allocator,
+        BufferUsage {
+            storage_buffer: true,
+            ..Default::default()
+        },
+        false,
+        view_position
+    ).expect("Failed to create buffer");
+
+
     let mut descriptor_sets = match create_descriptor_sets_for_swapchain(
         &descriptor_allocator, 
         pipeline.clone(), 
-        &images_views
+        &images_views,
+        view_pos_buffer.clone()
     ) {
         Ok(sets) => sets,
         Err(err) => { println!("Descriptor sets creating error: {:?}", err); return; }
@@ -509,9 +545,10 @@ fn main() {
         true
     );
     let mut is_show_infos = false;
+    let mut is_mouse_move_active = false;
 
-    let now = Instant::now();
-    let mut old_since_time = now.elapsed().as_millis();
+    // let now = Instant::now();
+    // let mut old_since_time = now.elapsed().as_millis();
     event_loop.run(move |event, _, control_flow| {
         // let since_time = now.elapsed().as_millis();
         // let delta_time = (since_time - old_since_time) as f64;
@@ -541,7 +578,8 @@ fn main() {
                         match create_descriptor_sets_for_swapchain(
                             &descriptor_allocator, 
                             pipeline.clone(), 
-                            &images_views
+                            &images_views,
+                            view_pos_buffer.clone()
                         ) {
                             Ok(ds) => descriptor_sets = ds,
                             Err(err) => { println!("Descriptor sets recreating error: {:?}", err); return; }
@@ -574,6 +612,27 @@ fn main() {
                             => is_show_infos = !is_show_infos,
                         _ => ()
                     },
+                    DeviceEvent::Button { button, state } => {
+                        if state == ElementState::Pressed && button == 3 {
+                            is_mouse_move_active = true;
+                        }
+                        else { is_mouse_move_active = false; }
+                    }
+                    DeviceEvent::MouseMotion { delta } => {
+                        if is_mouse_move_active {
+                            view_position.pos_x -= (delta.0 as f32) / (view_position.zoom * 0.1).exp();
+                            view_position.pos_y -= (delta.1 as f32) / (view_position.zoom * 0.1).exp();
+                            //println!("{} {}", delta_x, delta_y);
+                        }
+                    },
+                    DeviceEvent::MouseWheel { delta } => match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                            if view_position.zoom + y > 0.0 {
+                                view_position.zoom += y
+                            }
+                        },
+                        _ => (),
+                    },
                     _ => ()
                 }
                 // println!("{:?}", event)
@@ -596,7 +655,26 @@ fn main() {
                     if !is_show_infos {
                         let frame = egui::Frame::none();
                         egui::CentralPanel::default().frame(frame).show(&ctx, |ui| {
-                            ui.button("OK");
+                            egui::Area::new("MiniPanel Area")
+                            .show(&ctx, |ui| {
+                                egui::Frame::none()
+                                .fill(egui::Color32::from_rgb(200, 200, 200))
+                                .outer_margin(egui::style::Margin::same(5.0))
+                                .inner_margin(egui::style::Margin::same(10.0))
+                                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(0, 0, 0)))
+                                .show(ui, |ui| {
+                                    ui.style_mut().spacing.slider_width = 300.0;
+                                    ui.add(egui::Slider::new(&mut view_position.quality, 1..=1000).text("Quality"));
+                                    ui.add(egui::Slider::new(&mut view_position.zoom, 1.0..=150.0).text("Zoom"));
+                                    ui.add(egui::Slider::new(&mut view_position.pos_x, -1000.0..=1000.0).text("Pos X"));
+                                    ui.add(egui::Slider::new(&mut view_position.pos_y, -1000.0..=1000.0).text("Pox Y"));
+                                    ui.horizontal(|ui| {
+                                        if ui.button("Reset").clicked() {
+                                            view_position = ViewPosition::new();
+                                        }
+                                    });
+                                });
+                            });
                         });
                         return;
                     }
@@ -622,6 +700,7 @@ fn main() {
                         });
                     });
                 });
+
 
 
 
@@ -655,6 +734,12 @@ fn main() {
                     Err(FlushError::OutOfDate) => { return; }
                     Err(e) => { println!("Failed to flush future: {:?}", e); }
                 }
+
+                let mut content = view_pos_buffer.write().unwrap();
+                content.quality = view_position.quality;
+                content.zoom = view_position.zoom;
+                content.pos_x = view_position.pos_x;
+                content.pos_y = view_position.pos_y;
             }
             Event::RedrawEventsCleared => {},
             Event::LoopDestroyed => {},
