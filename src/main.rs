@@ -263,25 +263,17 @@ fn recreate_swapchain(swapchain: Arc<Swapchain>, window: Arc<winit::window::Wind
 }
 
 fn find_correct_image_format_by_device(device: Arc<Device>, image_formats: &Vec<Format>) -> Format {
-    // Убрать!!!!!!!!!!!!!!!!!!!
     for format in image_formats {
         let prop = if let Ok(p) = device.physical_device()
             .format_properties(format.clone()) { p } else { continue };
         let is_storage = prop.optimal_tiling_features.storage_image;
-        if is_storage && format == &Format::R8G8B8A8_UNORM { return format.clone(); }
-    }
-
-    for format in image_formats {
-        let prop = if let Ok(p) = device.physical_device()
-            .format_properties(format.clone()) { p } else { continue };
-        let is_storage = prop.optimal_tiling_features.storage_image;
-        if is_storage && format == &Format::B8G8R8A8_SRGB { return format.clone(); }
+        if is_storage && format == &Format::R8G8B8A8_SNORM { return format.clone(); }
     }
     for format in image_formats {
         let prop = if let Ok(p) = device.physical_device()
             .format_properties(format.clone()) { p } else { continue };
         let is_storage = prop.optimal_tiling_features.storage_image;
-        if is_storage && format == &Format::B8G8R8A8_SNORM { return format.clone(); }
+        if is_storage && format == &Format::R8G8B8A8_SRGB { return format.clone(); }
     }
     for format in image_formats {
         let prop = if let Ok(p) = device.physical_device()
@@ -426,49 +418,49 @@ fn main() {
         .with_inner_size(PhysicalSize::new(1000, 800));
     let window = match window_builder.build(&event_loop) {
         Ok(win) => Arc::new(win),
-        Err(err) => { println!("Window creating error: {}", err); return; }
+        Err(err) => { println!("Window creating error: {:?}", err); return; }
     };
 
     let instance = match create_vulkan_instance() {
         Ok(inst) => inst,
-        Err(err) => { println!("Vulkan instance creating error: {}", err); return; }
+        Err(err) => { println!("Vulkan instance creating error: {:?}", err); return; }
     };
 
     let surface = match vulkano_win::create_surface_from_winit(window.clone(), instance.clone()) {
         Ok(surface) => surface,
-        Err(err) => { println!("Surface creating error: {}", err); return; }
+        Err(err) => { println!("Surface creating error: {:?}", err); return; }
     };
 
     let physical_devices = match get_right_devices(instance.clone()) {
         Ok(pd) => pd,
-        Err(err) => { println!("Physical devices error: {}", err); return; }
+        Err(err) => { println!("Physical devices error: {:?}", err); return; }
     };
 
     let (device, queues) = match create_device_connection(physical_devices[0].clone()) {
         Ok(device) => device,
-        Err(err) => { println!("Device creating error: {}", err); return; }
+        Err(err) => { println!("Device creating error: {:?}", err); return; }
     };
     let main_queue = queues[0].clone();
 
     let win32_monitor = get_app_monitor(window.clone());
     let (mut swapchain, mut images) = match create_swapchain(surface.clone(), device.clone(), win32_monitor) {
         Ok(swapchain_images) => swapchain_images,
-        Err(err) => { println!("Swapchain creating error: {}", err); return; }
+        Err(err) => { println!("Swapchain creating error: {:?}", err); return; }
     };
 
-    let render_pass = match create_render_pass(device.clone(), swapchain.image_format()) {
-        Ok(render_pass) => render_pass,
-        Err(err) => { println!("RenderPass creating error: {}", err); return; }
-    };
+    // let render_pass = match create_render_pass(device.clone(), swapchain.image_format()) {
+    //     Ok(render_pass) => render_pass,
+    //     Err(err) => { println!("RenderPass creating error: {}", err); return; }
+    // };
 
-    let mut framebuffers = match create_framebuffers(render_pass.clone(), &images) {
-        Ok(framebuffers) => framebuffers,
-        Err(err) => { println!("Framebuffers creating error: {}", err); return; }
-    };
+    // let mut framebuffers = match create_framebuffers(render_pass.clone(), &images) {
+    //     Ok(framebuffers) => framebuffers,
+    //     Err(err) => { println!("Framebuffers creating error: {}", err); return; }
+    // };
 
     let mut pipeline = match create_pipeline(device.clone()) {
         Ok(pipeline) => pipeline,
-        Err(err) => { println!("Pipeline creating error: {}", err); return; }
+        Err(err) => { println!("Pipeline creating error: {:?}", err); return; }
     };
 
 
@@ -485,7 +477,7 @@ fn main() {
 
     let mut images_views = match create_images_views(&images) {
         Ok(views) => views,
-        Err(err) => { println!("Images views creating error: {}", err); return; }
+        Err(err) => { println!("Images views creating error: {:?}", err); return; }
     };
 
     let mut descriptor_sets = match create_descriptor_sets_for_swapchain(
@@ -494,7 +486,7 @@ fn main() {
         &images_views
     ) {
         Ok(sets) => sets,
-        Err(err) => { println!("Descriptor sets creating error: {}", err); return; }
+        Err(err) => { println!("Descriptor sets creating error: {:?}", err); return; }
     };
 
     let mut command_buffers = match create_render_command_buffers(
@@ -505,7 +497,7 @@ fn main() {
         (window.inner_size().width, window.inner_size().height)
     ) {
         Ok(command_buffers) => command_buffers,
-        Err(err) => { println!("Command buffers creating error: {}", err); return; }
+        Err(err) => { println!("Command buffers creating error: {:?}", err); return; }
     };
 
 
@@ -521,8 +513,6 @@ fn main() {
     let now = Instant::now();
     let mut old_since_time = now.elapsed().as_millis();
     event_loop.run(move |event, _, control_flow| {
-        //*control_flow = ControlFlow::Wait;
-
         // let since_time = now.elapsed().as_millis();
         // let delta_time = (since_time - old_since_time) as f64;
 
@@ -534,19 +524,19 @@ fn main() {
                     WindowEvent::Resized(_) => {
                         match recreate_swapchain(swapchain.clone(), window.clone()) {
                             Ok(si) => { swapchain = si.0; images = si.1; },
-                            Err(err) => println!("Swapchain recreating error: {}", err)
+                            Err(err) => println!("Swapchain recreating error: {:?}", err)
                         };
-                        match create_framebuffers(render_pass.clone(), &images) {
-                            Ok(fb) => framebuffers = fb,
-                            Err(err) => println!("Framebuffers recreating error: {}", err)
-                        };
+                        // match create_framebuffers(render_pass.clone(), &images) {
+                        //     Ok(fb) => framebuffers = fb,
+                        //     Err(err) => println!("Framebuffers recreating error: {}", err)
+                        // };
                         match create_pipeline(device.clone()) {
                             Ok(pe) => pipeline = pe,
-                            Err(err) => { println!("Pipeline recreating error: {}", err); return; }
+                            Err(err) => { println!("Pipeline recreating error: {:?}", err); return; }
                         };
                         match create_images_views(&images) {
                             Ok(views) => images_views = views,
-                            Err(err) => { println!("Images views recreating error: {}", err); return; }
+                            Err(err) => { println!("Images views recreating error: {:?}", err); return; }
                         };
                         match create_descriptor_sets_for_swapchain(
                             &descriptor_allocator, 
@@ -554,7 +544,7 @@ fn main() {
                             &images_views
                         ) {
                             Ok(ds) => descriptor_sets = ds,
-                            Err(err) => { println!("Descriptor sets recreating error: {}", err); return; }
+                            Err(err) => { println!("Descriptor sets recreating error: {:?}", err); return; }
                         };
                         match create_render_command_buffers(
                             &command_buffer_allocator,
@@ -564,7 +554,7 @@ fn main() {
                             (window.inner_size().width, window.inner_size().height)
                         ) {
                             Ok(cb) => command_buffers = cb,
-                            Err(err) => { println!("Command buffers recreating error: {}", err); return; }
+                            Err(err) => { println!("Command buffers recreating error: {:?}", err); return; }
                         };
                     }
                     WindowEvent::ScaleFactorChanged { .. } => {
@@ -603,7 +593,14 @@ fn main() {
                 
                 gui.immediate_ui(|gui| {
                     let ctx = gui.context();
-                    if !is_show_infos { return }
+                    if !is_show_infos {
+                        let frame = egui::Frame::none();
+                        egui::CentralPanel::default().frame(frame).show(&ctx, |ui| {
+                            ui.button("OK");
+                        });
+                        return;
+                    }
+
                     let frame = egui::Frame::none()
                         .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150));
                     egui::CentralPanel::default().frame(frame).show(&ctx, |ui| {

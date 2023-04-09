@@ -2,7 +2,7 @@
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
+layout(set = 0, binding = 0, rgba8_snorm) uniform writeonly image2D img;
 // layout(set = 0, binding = 1) buffer Time {
 //     float data[];
 // } time;
@@ -28,7 +28,7 @@ void main() {
             break;
         }
     }
-
+    
     float rc = sin(z.x * z.x - z.y * z.y + c.y);
     float gc = cos(z.x * z.x - z.y * z.y + c.x);
     float bc = tan(z.x * z.x - z.y * z.y + c.x * c.y);
