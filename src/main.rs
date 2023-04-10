@@ -31,9 +31,9 @@ use vulkano::memory::allocator::suballocator::{ FreeListAllocator, BumpAllocator
 use vulkano::buffer::{ BufferUsage, BufferAccess, CpuAccessibleBuffer, 
     CpuBufferPool, DeviceLocalBuffer };
 use vulkano::buffer::cpu_pool::CpuBufferPoolSubbuffer;
-use vulkano::image::{ AttachmentImage, SwapchainImage, ImageAccess, ImageUsage, 
-    ImageLayout, SampleCount };
-use vulkano::image::view::{ ImageView, ImageViewCreationError };
+use vulkano::image::{ StorageImage, SwapchainImage, ImageAccess, ImageUsage, 
+    ImageLayout, SampleCount, ImageDimensions, ImageCreateFlags };
+use vulkano::image::view::{ ImageViewAbstract, ImageView, ImageViewCreationError };
 use vulkano::format::Format;
 use vulkano::swapchain::{ self, Surface, SurfaceInfo, SurfaceCapabilities, Win32Monitor,
     ColorSpace, PresentMode, FullScreenExclusive, Swapchain, SwapchainCreateInfo, 
@@ -43,12 +43,12 @@ use vulkano::render_pass::{ RenderPass, RenderPassCreateInfo, RenderPassCreation
     Framebuffer, FramebufferCreateInfo, FramebufferCreationError };
 use vulkano::pipeline::{ Pipeline, ComputePipeline, PipelineBindPoint };
 use vulkano::shader::spirv::SpirvError;
-use vulkano::descriptor_set::{ PersistentDescriptorSet, WriteDescriptorSet };
+use vulkano::descriptor_set::{ PersistentDescriptorSet, WriteDescriptorSet, DescriptorSet, DescriptorBindingResources };
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::command_buffer::allocator::{ StandardCommandBufferAllocator, 
     StandardCommandBufferAllocatorCreateInfo };
 use vulkano::command_buffer::{ AutoCommandBufferBuilder, CommandBufferUsage, 
-    PrimaryAutoCommandBuffer };
+    PrimaryAutoCommandBuffer, CopyImageInfo };
 use vulkano::sync::{ self, GpuFuture, FlushError };
 
 
@@ -63,10 +63,12 @@ const UI_SIZE: f32 = 0.7;
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Zeroable, Pod)]
 struct ViewPosition {
+    pub color: [f32; 3],
     pub quality: u32,
+    pub fract_color: [f32; 3],
     pub zoom: f32,
     pub pos_x: f32,
-    pub pos_y: f32
+    pub pos_y: f32,
 }
 impl ViewPosition {
     fn new() -> Self {
@@ -74,7 +76,17 @@ impl ViewPosition {
             quality: 500,
             zoom: 1.0,
             pos_x: 0.0,
-            pos_y: 0.0
+            pos_y: 0.0,
+            color: [0.0, 1.0, 0.0],
+            fract_color: [0.0, 0.0, 0.0],
+        }
+    }
+
+    fn reset(self) -> Self {
+        ViewPosition {
+            color: self.color,
+            fract_color: self.fract_color,
+            ..ViewPosition::new()
         }
     }
 }
@@ -237,10 +249,6 @@ fn create_swapchain(surface: Arc<Surface>, device: Arc<Device>, monitor: Option<
         &surface,
         surface_info
     )?;
-    let image_formats: Vec<Format> = device.physical_device().surface_formats(
-        &surface,
-        Default::default()
-    )?.iter().map(|c| c.0).collect();
 
     let image_extent = surface_capabilities.current_extent.unwrap_or([0, 0]);
     let min_image_count = match surface_capabilities.max_image_count {
@@ -248,18 +256,17 @@ fn create_swapchain(surface: Arc<Surface>, device: Arc<Device>, monitor: Option<
         Some(limit) => cmp::min(cmp::max(3, surface_capabilities.min_image_count), limit)
     };
     let image_usage = ImageUsage {
-        storage: true,
+        transfer_dst: true,
         color_attachment: true,
         .. ImageUsage::empty()
     };
-    let image_format = find_correct_image_format_by_device(device.clone(), &image_formats);
 
     let swapchain_and_images = Swapchain::new(
         device.clone(),
         surface,
         SwapchainCreateInfo {
             min_image_count,
-            image_format: Some(image_format),
+            image_format: Some(Format::B8G8R8A8_SRGB),
             image_color_space: ColorSpace::SrgbNonLinear,
             image_extent,
             image_usage,
@@ -280,28 +287,6 @@ fn recreate_swapchain(swapchain: Arc<Swapchain>, window: Arc<winit::window::Wind
         ..swapchain.create_info()
     })?;
     Ok(swapchain_images)
-}
-
-fn find_correct_image_format_by_device(device: Arc<Device>, image_formats: &Vec<Format>) -> Format {
-    for format in image_formats {
-        let prop = if let Ok(p) = device.physical_device()
-            .format_properties(format.clone()) { p } else { continue };
-        let is_storage = prop.optimal_tiling_features.storage_image;
-        if is_storage && format == &Format::R8G8B8A8_SNORM { return format.clone(); }
-    }
-    for format in image_formats {
-        let prop = if let Ok(p) = device.physical_device()
-            .format_properties(format.clone()) { p } else { continue };
-        let is_storage = prop.optimal_tiling_features.storage_image;
-        if is_storage && format == &Format::R8G8B8A8_SRGB { return format.clone(); }
-    }
-    for format in image_formats {
-        let prop = if let Ok(p) = device.physical_device()
-            .format_properties(format.clone()) { p } else { continue };
-        let is_storage = prop.optimal_tiling_features.storage_image;
-        if is_storage { return format.clone() }
-    }
-    image_formats[0]
 }
 
 fn create_render_pass(device: Arc<Device>, image_format: Format) 
@@ -368,7 +353,37 @@ fn create_pipeline(device: Arc<Device>) -> Result<Arc<ComputePipeline>, Box<dyn 
     Ok(pipeline)
 }
 
-fn create_images_views(images: &Vec<Arc<SwapchainImage>>) 
+fn create_storage_images_views(
+    allocator: &GenericMemoryAllocator::<Arc<BumpAllocator>>,
+    swapchain: Arc<Swapchain>,
+    queue_family_index: u32)
+-> Result<Vec<Arc<ImageView<StorageImage>>>, Box<dyn Error>> {
+
+    let mut images_views = vec![];
+    for _ in 0..swapchain.image_count() {
+        let image = StorageImage::with_usage(
+            allocator,
+            ImageDimensions::Dim2d { 
+                width: swapchain.image_extent()[0],
+                height: swapchain.image_extent()[1],
+                array_layers: swapchain.image_array_layers()
+            },
+            Format::R8G8B8A8_UNORM,
+            ImageUsage {
+                transfer_src: true,
+                storage: true,
+                ..Default::default()
+            },
+            ImageCreateFlags::default(),
+            [queue_family_index]
+        )?;
+        let view = ImageView::new_default(image)?;
+        images_views.push(view);
+    }
+    Ok(images_views)
+}
+
+fn create_swapchain_images_views(images: &Vec<Arc<SwapchainImage>>) 
 -> Result<Vec<Arc<ImageView<SwapchainImage>>>, ImageViewCreationError> {
     let mut images_views = vec![];
     for image in images {
@@ -381,10 +396,9 @@ fn create_images_views(images: &Vec<Arc<SwapchainImage>>)
 fn create_descriptor_sets_for_swapchain(
     descriptor_allocator: &StandardDescriptorSetAllocator,
     pipeline: Arc<ComputePipeline>,
-    images_views: &Vec<Arc<ImageView<SwapchainImage>>>,
+    images_views: &Vec<Arc<ImageView<StorageImage>>>,
     view_pos_buffer: Arc<CpuAccessibleBuffer<ViewPosition>>) 
 -> Result<Vec<Arc<PersistentDescriptorSet>>, Box<dyn Error>> {
-
     let mut result = vec![];
     for image_view in images_views {
         let descriptor_set_layout = pipeline.layout().set_layouts().get(0)
@@ -405,13 +419,15 @@ fn create_descriptor_sets_for_swapchain(
 fn create_render_command_buffers(
     command_buffer_allocator: &StandardCommandBufferAllocator,
     pipeline: Arc<ComputePipeline>,
-    queue_family_index: u32,
+    extent: (u32, u32),
     descriptor_sets: &Vec<Arc<PersistentDescriptorSet>>,
-    extent: (u32, u32),)
+    render_images_views: &Vec<Arc<ImageView<StorageImage>>>,
+    present_images: &Vec<Arc<ImageView<SwapchainImage>>>,
+    queue_family_index: u32)
 -> Result<Vec<Arc<PrimaryAutoCommandBuffer>>, Box<dyn Error>> {
 
     let mut command_buffers = vec![];
-    for set in descriptor_sets {
+    for i in 0..descriptor_sets.len() {
         let mut command_buffer_builder = AutoCommandBufferBuilder::primary(
             command_buffer_allocator,
             queue_family_index,
@@ -423,9 +439,13 @@ fn create_render_command_buffers(
                 PipelineBindPoint::Compute,
                 pipeline.layout().clone(),
                 0,
-                vec![set.clone()]
+                vec![descriptor_sets[i].clone()]
             )
-            .dispatch([extent.0 / 16, extent.1 / 16, 1])?;
+            .dispatch([extent.0 / 16, extent.1 / 16, 1])?
+            .copy_image(CopyImageInfo::images(
+                render_images_views[i].image().clone(), 
+                present_images[i].image().clone()
+            ))?;
 
         let command_buffer = command_buffer_builder.build()?;
         command_buffers.push(Arc::new(command_buffer));
@@ -485,6 +505,7 @@ fn main() {
         Err(err) => { println!("Pipeline creating error: {:?}", err); return; }
     };
 
+
     let descriptor_allocator = StandardDescriptorSetAllocator::new(device.clone());
     let command_buffer_allocator = StandardCommandBufferAllocator::new(
         device.clone(), 
@@ -494,18 +515,29 @@ fn main() {
             ..Default::default()
         }
     );
-    let free_list_memory_allocator = GenericMemoryAllocator::<Arc<FreeListAllocator>>
+    let mut storage_images_allocator = GenericMemoryAllocator::<Arc<BumpAllocator>>::new_default(device.clone());
+    let view_position_allocator = GenericMemoryAllocator::<Arc<FreeListAllocator>>
         ::new_default(device.clone());
 
+    
 
-    let mut images_views = match create_images_views(&images) {
+    let mut storage_images_views = match create_storage_images_views(
+        &storage_images_allocator,
+        swapchain.clone(),
+        main_queue.queue_family_index()
+    ) {
         Ok(views) => views,
-        Err(err) => { println!("Images views creating error: {:?}", err); return; }
+        Err(err) => { println!("Storage images views creating error: {:?}", err); return; }
+    };
+
+    let mut swapchain_images_views = match create_swapchain_images_views(&images) {
+        Ok(views) => views,
+        Err(err) => { println!("Swapchain images views creating error: {:?}", err); return; }
     };
 
     let mut view_position = ViewPosition::new();
     let view_pos_buffer = CpuAccessibleBuffer::from_data(
-        &free_list_memory_allocator,
+        &view_position_allocator,
         BufferUsage {
             storage_buffer: true,
             ..Default::default()
@@ -518,7 +550,7 @@ fn main() {
     let mut descriptor_sets = match create_descriptor_sets_for_swapchain(
         &descriptor_allocator, 
         pipeline.clone(), 
-        &images_views,
+        &storage_images_views,
         view_pos_buffer.clone()
     ) {
         Ok(sets) => sets,
@@ -528,9 +560,11 @@ fn main() {
     let mut command_buffers = match create_render_command_buffers(
         &command_buffer_allocator,
         pipeline.clone(), 
-        main_queue.queue_family_index(), 
+        (window.inner_size().width, window.inner_size().height),
         &descriptor_sets,
-        (window.inner_size().width, window.inner_size().height)
+        &storage_images_views,
+        &swapchain_images_views,
+        main_queue.queue_family_index()
     ) {
         Ok(command_buffers) => command_buffers,
         Err(err) => { println!("Command buffers creating error: {:?}", err); return; }
@@ -571,14 +605,23 @@ fn main() {
                             Ok(pe) => pipeline = pe,
                             Err(err) => { println!("Pipeline recreating error: {:?}", err); return; }
                         };
-                        match create_images_views(&images) {
-                            Ok(views) => images_views = views,
-                            Err(err) => { println!("Images views recreating error: {:?}", err); return; }
+                        storage_images_allocator = GenericMemoryAllocator::<Arc<BumpAllocator>>::new_default(device.clone());
+                        match create_storage_images_views(
+                            &storage_images_allocator,
+                            swapchain.clone(),
+                            main_queue.queue_family_index()
+                        ) {
+                            Ok(views) => storage_images_views = views,
+                            Err(err) => { println!("Storage images views recreating error: {:?}", err); return; }
+                        };
+                        match create_swapchain_images_views(&images) {
+                            Ok(views) => swapchain_images_views = views,
+                            Err(err) => { println!("Swapchain images views recreating error: {:?}", err); return; }
                         };
                         match create_descriptor_sets_for_swapchain(
                             &descriptor_allocator, 
                             pipeline.clone(), 
-                            &images_views,
+                            &storage_images_views,
                             view_pos_buffer.clone()
                         ) {
                             Ok(ds) => descriptor_sets = ds,
@@ -587,9 +630,11 @@ fn main() {
                         match create_render_command_buffers(
                             &command_buffer_allocator,
                             pipeline.clone(), 
-                            main_queue.queue_family_index(), 
+                            (window.inner_size().width, window.inner_size().height),
                             &descriptor_sets,
-                            (window.inner_size().width, window.inner_size().height)
+                            &storage_images_views,
+                            &swapchain_images_views,
+                            main_queue.queue_family_index()
                         ) {
                             Ok(cb) => command_buffers = cb,
                             Err(err) => { println!("Command buffers recreating error: {:?}", err); return; }
@@ -670,8 +715,10 @@ fn main() {
                                     ui.add(egui::Slider::new(&mut view_position.pos_y, -1000.0..=1000.0).text("Pox Y"));
                                     ui.horizontal(|ui| {
                                         if ui.button("Reset").clicked() {
-                                            view_position = ViewPosition::new();
+                                            view_position = view_position.reset();
                                         }
+                                        ui.color_edit_button_rgb(&mut view_position.color);
+                                        ui.color_edit_button_rgb(&mut view_position.fract_color);
                                     });
                                 });
                             });
@@ -715,8 +762,8 @@ fn main() {
                     };
 
                 let ui_future = gui.draw_on_image(
-                    exec_future, 
-                    images_views[image_index as usize].clone()
+                    exec_future,
+                    swapchain_images_views[image_index as usize].clone()
                 );
 
                 let fence_future = ui_future
@@ -740,6 +787,8 @@ fn main() {
                 content.zoom = view_position.zoom;
                 content.pos_x = view_position.pos_x;
                 content.pos_y = view_position.pos_y;
+                content.color = view_position.color;
+                content.fract_color = view_position.fract_color;
             }
             Event::RedrawEventsCleared => {},
             Event::LoopDestroyed => {},

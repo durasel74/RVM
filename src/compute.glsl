@@ -2,9 +2,11 @@
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-layout(set = 0, binding = 0, rgba8_snorm) uniform writeonly image2D img;
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
 layout(set = 0, binding = 1) buffer ViewPosition {
+    vec3 color;
     uint quality;
+    vec3 fract_color;
     float zoom;
     float pos_x;
     float pos_y;
@@ -37,13 +39,13 @@ void main() {
 
     if (iterations == view_position.quality)
     {
-        vec4 to_write = vec4(0.0f, 0.0f, 0.0f, 1.0);
+        vec4 to_write = vec4(view_position.fract_color.bgr, 1.0);
         imageStore(img, ivec2(gl_GlobalInvocationID.xy), to_write);
     }
     else
     {
         float iters = float(iterations) / view_position.quality;
-        vec4 to_write = vec4(0.0f, iters, 0.0f, 1.0);
+        vec4 to_write = vec4(view_position.color.bgr * iters, 1.0);
         imageStore(img, ivec2(gl_GlobalInvocationID.xy), to_write);
     }
 }
