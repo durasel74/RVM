@@ -13,8 +13,9 @@ layout(set = 0, binding = 1) buffer ViewPosition {
 } view_position;
 
 void main() {
-    vec2 norm_coordinates = (gl_GlobalInvocationID.xy + vec2(0.5)) / vec2(imageSize(img));
-    vec2 c = (norm_coordinates - vec2(0.5)) * 2.0 - vec2(1.0, 0.0);
+    float aspect_ratio = float(imageSize(img).x) / float(imageSize(img).y);
+    vec2 norm_coordinates = gl_GlobalInvocationID.xy;
+    vec2 c = (2.0 * norm_coordinates - vec2(imageSize(img))) / float(imageSize(img).y);
     vec2 z = vec2(0.0, 0.0);
 
     float actual_zoom = exp(view_position.zoom / 10.0);

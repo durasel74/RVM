@@ -18,6 +18,7 @@ use winit::event_loop::{ ControlFlow, EventLoop, DeviceEventFilter };
 use winit::window::WindowBuilder;
 use winit::platform::windows::WindowExtWindows;
 use winit::dpi::PhysicalSize;
+use winit::window::Fullscreen;
 
 use vulkano::{ VulkanLibrary, VulkanError };
 use vulkano::instance::{ Instance, InstanceCreateInfo };
@@ -75,7 +76,7 @@ impl ViewPosition {
         ViewPosition {
             quality: 500,
             zoom: 1.0,
-            pos_x: 0.0,
+            pos_x: -500.0,
             pos_y: 0.0,
             color: [0.0, 1.0, 0.0],
             fract_color: [0.0, 0.0, 0.0],
@@ -244,6 +245,7 @@ fn create_swapchain(surface: Arc<Surface>, device: Arc<Device>, monitor: Option<
         },
         None => SurfaceInfo::default()
     };
+    //let full_screen_exclusive = surface_info.full_screen_exclusive;
 
     let surface_capabilities = device.physical_device().surface_capabilities(
         &surface,
@@ -273,7 +275,7 @@ fn create_swapchain(surface: Arc<Surface>, device: Arc<Device>, monitor: Option<
             present_mode: PresentMode::Fifo, // PresentMode::Immediate | Vsync
             clipped: true,
             // full_screen_exclusive,
-            // win32_monitor,
+            // win32_monitor: monitor,
             ..Default::default()
         }
     )?;
@@ -579,7 +581,9 @@ fn main() {
         true
     );
     let mut is_show_infos = false;
+    let mut is_full_screen = false;
     let mut is_mouse_move_active = false;
+    let mut is_mouse_zoom_active = false;
 
     // let now = Instant::now();
     // let mut old_since_time = now.elapsed().as_millis();
@@ -655,6 +659,26 @@ fn main() {
                     DeviceEvent::Key(keyboard_input) => match keyboard_input {
                         KeyboardInput { scancode: 1, state: ElementState::Released, ..} 
                             => is_show_infos = !is_show_infos,
+                        KeyboardInput { scancode: 28, state: ElementState::Released, ..} 
+                            => {
+                                if !is_full_screen {
+                                    let current_monitor = match window.current_monitor() {
+                                        Some(monitor) => monitor,
+                                        None => return,
+                                    };
+                                    let video_mode = match current_monitor.video_modes().next() {
+                                        Some(video_mode) => video_mode,
+                                        None => return,
+                                    };
+
+                                    window.set_fullscreen(Some(Fullscreen::Exclusive(video_mode)));
+                                    is_full_screen = true;
+                                }
+                                else {
+                                    window.set_fullscreen(None);
+                                    is_full_screen = false;
+                                }
+                            },
                         _ => ()
                     },
                     DeviceEvent::Button { button, state } => {
@@ -662,12 +686,20 @@ fn main() {
                             is_mouse_move_active = true;
                         }
                         else { is_mouse_move_active = false; }
+
+                        if state == ElementState::Pressed && button == 2 {
+                            is_mouse_zoom_active = true;
+                        }
+                        else { is_mouse_zoom_active = false; }
                     }
                     DeviceEvent::MouseMotion { delta } => {
                         if is_mouse_move_active {
                             view_position.pos_x -= (delta.0 as f32) / (view_position.zoom * 0.1).exp();
                             view_position.pos_y -= (delta.1 as f32) / (view_position.zoom * 0.1).exp();
                             //println!("{} {}", delta_x, delta_y);
+                        }
+                        if is_mouse_zoom_active {
+                            view_position.zoom -= (delta.1 as f32) / 20.0;
                         }
                     },
                     DeviceEvent::MouseWheel { delta } => match delta {
