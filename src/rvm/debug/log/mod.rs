@@ -24,6 +24,14 @@ pub fn log_info<T: std::fmt::Display>(message: T) {
     }
 }
 
+pub fn log_warn<T: std::fmt::Display>(message: T) {
+    if let Ok(mut guard) = LOGGER.lock() {
+        if let Some(logger) = &mut *guard {
+            logger.log_warn(message);
+        }
+    }
+}
+
 pub fn log_error<T: std::fmt::Display>(error: T) {
     if let Ok(mut guard) = LOGGER.lock() {
         if let Some(logger) = &mut *guard {

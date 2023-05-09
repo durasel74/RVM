@@ -26,6 +26,11 @@ impl Logger {
         println!("[Info] {}", message);
     }
 
+    pub fn log_warn<T: std::fmt::Display>(&mut self, message: T) {
+        self.last_message = message.to_string();
+        println!("[Warning] {}", message);
+    }
+
     pub fn log_error<T: std::fmt::Display>(&mut self, error: T) {
         self.last_message = error.to_string();
         println!("[Error] {}", error);

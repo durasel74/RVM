@@ -11,9 +11,9 @@ impl Error for LogError { }
 impl std::fmt::Display for LogError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            LogError::InitializationFailed => write!(f, "Failed to initialize log"),
-            LogError::NotInitialized => write!(f, "Log has not been initialized"),
-            LogError::GuardLocked => write!(f, "Log guard was blocked"),
+            LogError::InitializationFailed => write!(f, "Не удалось инициализировать логи."),
+            LogError::NotInitialized => write!(f, "Логи не были инициализированы, запись не возможна!"),
+            LogError::GuardLocked => write!(f, "Логи находятся в блокировке другим потоком."),
         }
         
     }

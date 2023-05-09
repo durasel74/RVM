@@ -1,54 +1,86 @@
 use winit::event_loop::{ EventLoop, ControlFlow };
-use winit::window::Window;
+use winit::window::{ WindowBuilder, Window };
 use winit::event;
 use super::errors::AppInitError;
 use super::debug;
-use super::window;
+use super::render::Renderer;
 
+const PROJECT_NAME: &str = env!("CARGO_PKG_NAME");
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Стандартное приложение со всеми возможностями.
+#[derive(Debug)]
 pub struct StandardApplication {
     event_loop: EventLoop<()>,
     app_window: Window,
+    renderer: Renderer,
 }
 
-// Конструкторы
 impl StandardApplication {
+    /// Создает приложение для платформы Windows.
     pub fn new_windows() -> Result<Self, AppInitError> {
-        debug::log::init_log().unwrap();
-        debug::log::log_info("Запуск на платформе Windows.");
+        Self::init_log()?;
+        debug::log::log_info("Запуск на платформе Windows...");
 
         let event_loop = EventLoop::new();
-        let window = match window::init_app_window(&event_loop) {
-            Ok(win) => win,
-            Err(err) => {
-                let error = AppInitError::WindowInitError(err);
-                debug::log::log_error(error.clone());
-                return Err(error)
-            }
-        };
-        debug::log::log_info("Окно приложения инициализировано.");
+        let app_window = Self::init_app_window(&event_loop)?;
+        let renderer = Self::init_app_renderer()?;
 
-
-
-        debug::log::log_info("Тестовое сообщение");
-        println!("{}", debug::log::last_message().unwrap());
-        debug::log::log_error(AppInitError::WindowInitError("Тестовая ошибка".to_string()));
-        println!("{}", debug::log::last_message().unwrap());
 
 
 
         debug::log::log_info("Инициализация приложения завершена.");
         Ok(StandardApplication { 
             event_loop,
-            app_window: window,
+            app_window,
+            renderer,
         })
     }
 
     pub fn new_android() -> Result<Self, AppInitError> {
         Err(AppInitError::OSNotSupported("Android"))
     }
+
+    /// Инициализирует логи приложения.
+    pub fn init_log() -> Result<(), AppInitError> {
+        if let Err(err) = debug::log::init_log() {
+            Err(AppInitError::LogInitError(err.to_string()))
+        } else { Ok(()) }
+    }
+
+    /// Инициализирует главное окно приложения.
+    pub fn init_app_window(event_loop: &EventLoop<()>) -> Result<Window, AppInitError> {
+        let window_builder = WindowBuilder::new()
+            .with_title(format!("{} {}", PROJECT_NAME, VERSION))
+            .with_inner_size(winit::dpi::PhysicalSize::new(1000, 800))
+            .with_visible(false);
+
+        match window_builder.build(event_loop) {
+            Ok(win) => {
+                debug::log::log_info("Окно приложения инициализировано.");
+                Ok(win)
+            },
+            Err(err) => {
+                let error = AppInitError::WindowInitError(err.to_string());
+                debug::log::log_error(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    /// Инициализирует рендер приложения.
+    pub fn init_app_renderer() -> Result<Renderer, AppInitError> {
+        match Renderer::new_windows() {
+            Ok(renderer) => Ok(renderer),
+            Err(err) => {
+                let error = AppInitError::RendererInitError(err.to_string());
+                debug::log::log_error(error.clone());
+                Err(error)
+            }
+        }
+    }
 }
 
-//
 impl StandardApplication {
     pub fn run(self) {
         self.app_window.set_visible(true);
